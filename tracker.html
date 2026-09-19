@@ -1,0 +1,239 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+<title>Car Tracker — Sender</title>
+
+<!-- Firebase (compat SDK, no build tools needed) -->
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-database-compat.js"></script>
+
+<style>
+  :root {
+    --bg: #10151c;
+    --panel: #171f29;
+    --line: #26313f;
+    --text: #e8edf3;
+    --dim: #7c8a9a;
+    --amber: #e8a23d;
+    --green: #4caf7d;
+    --red: #e05a5a;
+    --mono: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; padding: 0; height: 100%;
+    background: var(--bg); color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    -webkit-tap-highlight-color: transparent;
+  }
+  body {
+    display: flex; align-items: center; justify-content: center;
+    padding: 24px;
+  }
+  .card {
+    width: 100%; max-width: 420px;
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 14px;
+    padding: 28px 24px;
+  }
+  h1 {
+    font-size: 19px; font-weight: 600; margin: 0 0 4px;
+    letter-spacing: -0.01em;
+  }
+  .sub { color: var(--dim); font-size: 13px; margin: 0 0 24px; }
+
+  .dot {
+    display: inline-block; width: 9px; height: 9px; border-radius: 50%;
+    background: var(--dim); margin-right: 8px; flex-shrink: 0;
+  }
+  .dot.live { background: var(--green); box-shadow: 0 0 0 4px rgba(76,175,125,0.15); }
+  .dot.err { background: var(--red); box-shadow: 0 0 0 4px rgba(224,90,90,0.15); }
+
+  .status-row {
+    display: flex; align-items: center;
+    font-size: 14px; color: var(--dim);
+    margin-bottom: 20px;
+  }
+  .status-row span.label { color: var(--text); font-weight: 500; }
+
+  button {
+    width: 100%; padding: 16px; border: none; border-radius: 10px;
+    font-size: 16px; font-weight: 600; cursor: pointer;
+    background: var(--amber); color: #1a1305;
+    transition: opacity 0.15s ease;
+  }
+  button:active { opacity: 0.8; }
+  button.stop { background: var(--red); color: #2a0d0d; }
+  button:disabled { opacity: 0.5; cursor: default; }
+
+  .data {
+    margin-top: 22px; padding-top: 18px;
+    border-top: 1px solid var(--line);
+    display: none;
+  }
+  .data.show { display: block; }
+  .row {
+    display: flex; justify-content: space-between;
+    font-size: 13px; padding: 6px 0; color: var(--dim);
+  }
+  .row span:last-child { color: var(--text); font-family: var(--mono); }
+
+  .note {
+    margin-top: 18px; font-size: 12px; color: var(--dim); line-height: 1.5;
+  }
+</style>
+</head>
+<body>
+
+<div class="card">
+  <h1>Car Tracker</h1>
+  <p class="sub">Leave this open on the phone in your car.</p>
+
+  <div class="status-row">
+    <span class="dot" id="dot"></span>
+    <span id="statusText">Not started</span>
+  </div>
+
+  <button id="toggleBtn">Start Tracking</button>
+
+  <div class="data" id="dataBlock">
+    <div class="row"><span>Latitude</span><span id="lat">—</span></div>
+    <div class="row"><span>Longitude</span><span id="lng">—</span></div>
+    <div class="row"><span>Accuracy</span><span id="acc">—</span></div>
+    <div class="row"><span>Last sent</span><span id="ts">—</span></div>
+    <div class="row"><span>Updates sent</span><span id="count">0</span></div>
+  </div>
+
+  <p class="note">Keep this phone charging. Some phones will still dim/lock the screen and pause the page — if tracking stops unexpectedly, check your phone's battery/power-saving settings and exclude this browser tab from being killed in the background.</p>
+</div>
+
+<script>
+  // ====== PASTE YOUR FIREBASE CONFIG HERE ======
+  const firebaseConfig = {
+    apiKey: "AIzaSyBZcOiMYkMgYgLW4Dw-z9tXn5iDaOY2W-Q",
+    authDomain: "my-tracker-32e93.firebaseapp.com",
+    databaseURL: "https://my-tracker-32e93-default-rtdb.europe-west1.firebasedatabase.app",
+    projectId: "my-tracker-32e93",
+    storageBucket: "my-tracker-32e93.firebasestorage.app",
+    messagingSenderId: "318922888225",
+    appId: "1:318922888225:web:bcb125c5ebd312ef55ff60"
+  };
+  // ==============================================
+
+  firebase.initializeApp(firebaseConfig);
+  const db = firebase.database();
+  // Change this path to something private/hard-to-guess of your own choosing.
+  const DB_PATH = "carLocation";
+
+  const dot = document.getElementById("dot");
+  const statusText = document.getElementById("statusText");
+  const toggleBtn = document.getElementById("toggleBtn");
+  const dataBlock = document.getElementById("dataBlock");
+  const latEl = document.getElementById("lat");
+  const lngEl = document.getElementById("lng");
+  const accEl = document.getElementById("acc");
+  const tsEl = document.getElementById("ts");
+  const countEl = document.getElementById("count");
+
+  let watchId = null;
+  let wakeLock = null;
+  let sentCount = 0;
+
+  function setStatus(state, text) {
+    dot.className = "dot" + (state ? " " + state : "");
+    statusText.textContent = text;
+  }
+
+  async function requestWakeLock() {
+    try {
+      if ("wakeLock" in navigator) {
+        wakeLock = await navigator.wakeLock.request("screen");
+      }
+    } catch (e) {
+      // Wake lock not supported or denied — not fatal, just note it.
+      console.warn("Wake lock unavailable:", e);
+    }
+  }
+
+  function releaseWakeLock() {
+    if (wakeLock) {
+      wakeLock.release().catch(() => {});
+      wakeLock = null;
+    }
+  }
+
+  function onPosition(pos) {
+    const { latitude, longitude, accuracy, speed, heading } = pos.coords;
+    const now = Date.now();
+
+    db.ref(DB_PATH).set({
+      lat: latitude,
+      lng: longitude,
+      accuracy: accuracy,
+      speed: speed,
+      heading: heading,
+      timestamp: now
+    }).then(() => {
+      sentCount++;
+      countEl.textContent = sentCount;
+      setStatus("live", "Tracking — live");
+    }).catch((err) => {
+      setStatus("err", "Send failed: " + err.message);
+    });
+
+    latEl.textContent = latitude.toFixed(6);
+    lngEl.textContent = longitude.toFixed(6);
+    accEl.textContent = Math.round(accuracy) + " m";
+    tsEl.textContent = new Date(now).toLocaleTimeString();
+    dataBlock.classList.add("show");
+  }
+
+  function onError(err) {
+    setStatus("err", "GPS error: " + err.message);
+  }
+
+  function startTracking() {
+    if (!("geolocation" in navigator)) {
+      setStatus("err", "Geolocation not supported on this device/browser");
+      return;
+    }
+    watchId = navigator.geolocation.watchPosition(onPosition, onError, {
+      enableHighAccuracy: true,
+      maximumAge: 5000,
+      timeout: 20000
+    });
+    requestWakeLock();
+    setStatus("live", "Starting…");
+    toggleBtn.textContent = "Stop Tracking";
+    toggleBtn.classList.add("stop");
+  }
+
+  function stopTracking() {
+    if (watchId !== null) {
+      navigator.geolocation.clearWatch(watchId);
+      watchId = null;
+    }
+    releaseWakeLock();
+    setStatus(null, "Stopped");
+    toggleBtn.textContent = "Start Tracking";
+    toggleBtn.classList.remove("stop");
+  }
+
+  toggleBtn.addEventListener("click", () => {
+    if (watchId === null) startTracking();
+    else stopTracking();
+  });
+
+  // Re-acquire wake lock if the tab regains visibility while tracking
+  document.addEventListener("visibilitychange", () => {
+    if (watchId !== null && document.visibilityState === "visible") {
+      requestWakeLock();
+    }
+  });
+</script>
+
+</body>
+</html>

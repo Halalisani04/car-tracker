@@ -1,0 +1,229 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Car Tracker — Viewer</title>
+
+<!-- Leaflet for the map -->
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+
+<!-- Firebase (compat SDK) -->
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-database-compat.js"></script>
+
+<style>
+  :root {
+    --bg: #10151c;
+    --panel: #171f29;
+    --line: #26313f;
+    --text: #e8edf3;
+    --dim: #9aa7b5;
+    --amber: #e8a23d;
+    --green: #4caf7d;
+    --red: #e05a5a;
+    --mono: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; padding: 0; height: 100%;
+    background: var(--bg); color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  }
+  #map { position: absolute; inset: 0; z-index: 0; }
+
+  .panel {
+    position: absolute; top: 16px; left: 16px; right: 16px;
+    z-index: 10;
+    max-width: 380px;
+    background: rgba(23, 31, 41, 0.94);
+    backdrop-filter: blur(6px);
+    border: 1px solid var(--line);
+    border-radius: 14px;
+    padding: 16px 18px;
+    box-shadow: 0 8px 24px rgba(0,0,0,0.35);
+  }
+  h1 { font-size: 16px; font-weight: 600; margin: 0 0 10px; letter-spacing: -0.01em; }
+
+  .status-row { display: flex; align-items: center; font-size: 13px; margin-bottom: 10px; }
+  .dot {
+    width: 9px; height: 9px; border-radius: 50%;
+    background: var(--dim); margin-right: 8px; flex-shrink: 0;
+  }
+  .dot.fresh { background: var(--green); box-shadow: 0 0 0 4px rgba(76,175,125,0.15); }
+  .dot.stale { background: var(--amber); box-shadow: 0 0 0 4px rgba(232,162,61,0.15); }
+  .dot.gone { background: var(--red); box-shadow: 0 0 0 4px rgba(224,90,90,0.15); }
+
+  .row {
+    display: flex; justify-content: space-between;
+    font-size: 12.5px; padding: 4px 0; color: var(--dim);
+  }
+  .row span:last-child { color: var(--text); font-family: var(--mono); }
+
+  .recenter {
+    position: absolute; bottom: 24px; right: 16px; z-index: 10;
+    background: var(--panel); border: 1px solid var(--line);
+    color: var(--text); border-radius: 10px;
+    padding: 10px 16px; font-size: 13px; font-weight: 600;
+    cursor: pointer;
+  }
+</style>
+</head>
+<body>
+
+<div id="map"></div>
+
+<div class="panel">
+  <h1>Car Location</h1>
+  <div class="status-row">
+    <span class="dot" id="dot"></span>
+    <span id="statusText">Connecting…</span>
+  </div>
+  <div class="row"><span>Last update</span><span id="lastSeen">—</span></div>
+  <div class="row"><span>Accuracy</span><span id="acc">—</span></div>
+  <div class="row"><span>Speed</span><span id="speed">—</span></div>
+</div>
+
+<button class="recenter" id="recenterBtn">Recenter</button>
+
+<script>
+  // ====== PASTE YOUR FIREBASE CONFIG HERE (same as tracker.html) ======
+  const firebaseConfig = {
+    apiKey: "AIzaSyBZcOiMYkMgYgLW4Dw-z9tXn5iDaOY2W-Q",
+    authDomain: "my-tracker-32e93.firebaseapp.com",
+    databaseURL: "https://my-tracker-32e93-default-rtdb.europe-west1.firebasedatabase.app",
+    projectId: "my-tracker-32e93",
+    storageBucket: "my-tracker-32e93.firebasestorage.app",
+    messagingSenderId: "318922888225",
+    appId: "1:318922888225:web:bcb125c5ebd312ef55ff60"
+  };
+  // ======================================================================
+
+  firebase.initializeApp(firebaseConfig);
+  const db = firebase.database();
+  const DB_PATH = "carLocation"; // must match tracker.html
+
+  const dot = document.getElementById("dot");
+  const statusText = document.getElementById("statusText");
+  const lastSeenEl = document.getElementById("lastSeen");
+  const accEl = document.getElementById("acc");
+  const speedEl = document.getElementById("speed");
+  const recenterBtn = document.getElementById("recenterBtn");
+
+  const map = L.map("map", {
+    zoomControl: false,
+    inertia: false,          // removes the "flinging" overshoot when you pan
+    wheelPxPerZoomLevel: 200, // higher = slower, more controlled scroll-zoom (default is 60)
+    zoomSnap: 0.5,            // allows half-zoom-level steps, feels smoother
+    zoomDelta: 0.5,           // each zoom action moves half a level instead of a full one
+    doubleClickZoom: true,
+    dragging: true            // click-and-drag / touch-drag panning in every direction
+  }).setView([0, 0], 2);
+  L.control.zoom({ position: "bottomleft" }).addTo(map);
+  L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+    attribution: "&copy; OpenStreetMap contributors",
+    maxZoom: 19
+  }).addTo(map);
+
+  // Leaflet sometimes measures its container before the page has fully
+  // laid out, which makes the map render at the wrong size/position.
+  // Forcing a recalculation fixes it.
+  function fixMapSize() { map.invalidateSize(); }
+  window.addEventListener("load", fixMapSize);
+  window.addEventListener("resize", fixMapSize);
+  setTimeout(fixMapSize, 300);
+  setTimeout(fixMapSize, 1000);
+
+  const carIcon = L.divIcon({
+    className: "",
+    html: '<div style="width:16px;height:16px;border-radius:50%;background:#e8a23d;border:3px solid #10151c;box-shadow:0 0 0 3px rgba(232,162,61,0.35);"></div>',
+    iconSize: [16, 16],
+    iconAnchor: [8, 8]
+  });
+
+  let marker = null;
+  let accuracyCircle = null;
+  let hasCentered = false;
+  let lastLat = null, lastLng = null;
+
+  function fmtAgo(ms) {
+    const s = Math.round((Date.now() - ms) / 1000);
+    if (s < 60) return s + "s ago";
+    const m = Math.round(s / 60);
+    if (m < 60) return m + "m ago";
+    const h = Math.round(m / 60);
+    return h + "h ago";
+  }
+
+  function updateFreshness(timestamp) {
+    const age = Date.now() - timestamp;
+    if (age < 30000) {
+      dot.className = "dot fresh";
+      statusText.textContent = "Live";
+    } else if (age < 120000) {
+      dot.className = "dot stale";
+      statusText.textContent = "Signal delayed";
+    } else {
+      dot.className = "dot gone";
+      statusText.textContent = "Signal lost";
+    }
+    lastSeenEl.textContent = fmtAgo(timestamp);
+  }
+
+  db.ref(DB_PATH).on("value", (snap) => {
+    const data = snap.val();
+    if (!data) {
+      statusText.textContent = "No data yet";
+      dot.className = "dot gone";
+      return;
+    }
+    const { lat, lng, accuracy, speed, timestamp } = data;
+    lastLat = lat; lastLng = lng;
+
+    if (!marker) {
+      marker = L.marker([lat, lng], { icon: carIcon }).addTo(map);
+    } else {
+      marker.setLatLng([lat, lng]);
+    }
+
+    if (accuracyCircle) map.removeLayer(accuracyCircle);
+    accuracyCircle = L.circle([lat, lng], {
+      radius: accuracy || 0,
+      color: "#e8a23d",
+      weight: 1,
+      fillColor: "#e8a23d",
+      fillOpacity: 0.08
+    }).addTo(map);
+
+    if (!hasCentered) {
+      map.setView([lat, lng], 16);
+      hasCentered = true;
+    }
+
+    accEl.textContent = accuracy ? Math.round(accuracy) + " m" : "—";
+    speedEl.textContent = (speed !== null && speed !== undefined) ? Math.round(speed * 3.6) + " km/h" : "—";
+    updateFreshness(timestamp);
+  }, (err) => {
+    statusText.textContent = "Connection error";
+    dot.className = "dot gone";
+    console.error(err);
+  });
+
+  // Keep the "time ago" and staleness state ticking even with no new data
+  setInterval(() => {
+    db.ref(DB_PATH).once("value").then((snap) => {
+      const data = snap.val();
+      if (data) updateFreshness(data.timestamp);
+    });
+  }, 10000);
+
+  recenterBtn.addEventListener("click", () => {
+    if (lastLat !== null && lastLng !== null) {
+      map.setView([lastLat, lastLng], 16);
+    }
+  });
+</script>
+
+</body>
+</html>
